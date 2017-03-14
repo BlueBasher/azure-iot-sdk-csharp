@@ -7,7 +7,7 @@ namespace Microsoft.Azure.Devices.Client.Transport
     using System.Threading.Tasks;
     using Microsoft.Azure.Devices.Client.Extensions;
     using Microsoft.Azure.Devices.Shared;
-#if !WINDOWS_UWP && !NETMF && !PCL
+#if !NETMF && !PCL
     using Microsoft.Azure.Devices.Client.Transport.Mqtt;
 #endif
     class TransportHandlerFactory : ITransportHandlerFactory
@@ -18,18 +18,25 @@ namespace Microsoft.Azure.Devices.Client.Transport
             var transportSetting = context.Get<ITransportSettings>();
             var onMethodCallback = context.Get<DeviceClient.OnMethodCalledDelegate>();
             var onReportedStatePatchReceived = context.Get<Action<TwinCollection>>();
+            var OnConnectionClosedCallback = context.Get<DeviceClient.OnConnectionClosedDelegate>();
 
             switch (transportSetting.GetTransportType())
             {
                 case TransportType.Amqp_WebSocket_Only:
                 case TransportType.Amqp_Tcp_Only:
-                    return new AmqpTransportHandler(context, connectionString, transportSetting as AmqpTransportSettings, new Func<MethodRequestInternal, Task>(onMethodCallback));
+                    return new AmqpTransportHandler(
+                        context, connectionString, transportSetting as AmqpTransportSettings, 
+                        new Action<object, EventArgs>(OnConnectionClosedCallback),
+                        new Func<MethodRequestInternal, Task>(onMethodCallback));
                 case TransportType.Http1:
                     return new HttpTransportHandler(context, connectionString, transportSetting as Http1TransportSettings);
-#if !WINDOWS_UWP && !NETMF && !PCL
+#if !NETMF && !PCL
                 case TransportType.Mqtt_Tcp_Only:
                 case TransportType.Mqtt_WebSocket_Only:
-                    return new MqttTransportHandler(context, connectionString, transportSetting as MqttTransportSettings, new Func<MethodRequestInternal, Task>(onMethodCallback), onReportedStatePatchReceived);
+                    return new MqttTransportHandler(
+                        context, connectionString, transportSetting as MqttTransportSettings,
+                        new Action<object, EventArgs>(OnConnectionClosedCallback),
+                        new Func<MethodRequestInternal, Task>(onMethodCallback), onReportedStatePatchReceived);
 #endif
                 default:
                     throw new InvalidOperationException("Unsupported Transport Setting {0}".FormatInvariant(transportSetting));

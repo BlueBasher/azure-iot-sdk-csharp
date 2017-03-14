@@ -8,23 +8,56 @@ using System.Diagnostics;
 
 namespace Microsoft.Azure.Devices.Client.Samples
 {
+    class DeviceData
+    {
+        public DeviceData(string myName)
+        {
+            this.Name = myName;
+        }
+
+        public string Name
+        {
+            get; set;
+        }
+    }
+
     class IoTClient
     {
-        private static int MESSAGE_COUNT = 5;
+        private readonly string DeviceConnectionString = ConnectionStringProvider.Value;
 
-        // String containing Hostname, Device Id & Device Key in one of the following formats:
-        //  "HostName=<iothub_host_name>;DeviceId=<device_id>;SharedAccessKey=<device_key>"
-        //  "HostName=<iothub_host_name>;CredentialType=SharedAccessSignature;DeviceId=<device_id>;SharedAccessSignature=SharedAccessSignature sr=<iot_host>/devices/<device_id>&sig=<token>&se=<expiry_time>";
-        private const string DeviceConnectionString = "<replace>";
+        DeviceClient deviceClient;
+        public TransportType Protocol { get; private set; }
 
-        public async static Task Start()
+        Action<object> callMeLogger;
+        Action<object> getDeviceNameLogger;
+        Action<object> errorHandler;
+
+        public IoTClient(TransportType protocol, Action<object> callMeLogger, Action<object> getDeviceNameLogger, Action<object> errorHandler)
+        {
+            this.Protocol = protocol;
+            this.callMeLogger = callMeLogger;
+            this.getDeviceNameLogger = getDeviceNameLogger;
+            this.errorHandler = errorHandler;
+        }
+
+        public async Task Start()
         {
             try
             {
-                DeviceClient deviceClient = DeviceClient.CreateFromConnectionString(DeviceConnectionString, TransportType.Http1);
+                this.deviceClient = DeviceClient.CreateFromConnectionString(DeviceConnectionString, this.Protocol);
 
-                await SendEvent(deviceClient);
-                await ReceiveCommands(deviceClient);
+                await this.deviceClient.OpenAsync();
+
+                // Set up callbacks:
+                try
+                {
+                    await deviceClient.SetMethodHandlerAsync("microsoft.management.immediateReboot", ImmediateReboot, null);
+                    await deviceClient.SetMethodHandlerAsync("GetDeviceName", GetDeviceName, new DeviceData("Some UWP Device"));
+                }
+                catch
+                {
+                    errorHandler(string.Format("Methods are not supported for protocol {0}", this.Protocol));
+                }
 
                 Debug.WriteLine("Exited!\n");
             }
@@ -34,23 +67,46 @@ namespace Microsoft.Azure.Devices.Client.Samples
             }
         }
 
-        static async Task SendEvent(DeviceClient deviceClient)
+        public Task CloseAsync()
         {
-            string dataBuffer;
-
-            Debug.WriteLine("Device sending {0} messages to IoTHub...\n", MESSAGE_COUNT);
-
-            for (int count = 0; count < MESSAGE_COUNT; count++)
-            {
-                dataBuffer = string.Format("Msg from UWP: {0}_{1}", count, Guid.NewGuid().ToString());
-                Message eventMessage = new Message(Encoding.UTF8.GetBytes(dataBuffer));
-                Debug.WriteLine("\t{0}> Sending message: {1}, Data: [{2}]", DateTime.Now.ToLocalTime(), count, dataBuffer);
-
-                await deviceClient.SendEventAsync(eventMessage);
-            }
+            return this.deviceClient.CloseAsync();
         }
 
-        static async Task ReceiveCommands(DeviceClient deviceClient)
+        Task<MethodResponse> ImmediateReboot(MethodRequest methodRequest, object userContext)
+        {
+            this.callMeLogger(methodRequest.DataAsJson);
+
+            return Task.FromResult(new MethodResponse(new byte[0], 200));
+        }
+
+        Task<MethodResponse> GetDeviceName(MethodRequest methodRequest, object userContext)
+        {
+            MethodResponse retValue;
+            if (userContext == null)
+            {
+                retValue = new MethodResponse(new byte[0], 500);
+            }
+            else
+            {
+                var d = userContext as DeviceData;
+                string result = "{\"name\":\"" + d.Name + "\"}";
+                retValue = new MethodResponse(Encoding.UTF8.GetBytes(result), 200);
+            }
+
+            this.getDeviceNameLogger(methodRequest.DataAsJson);
+
+            return Task.FromResult(retValue);
+        }
+
+        public Task SendEvent(string message)
+        {
+            var dataBuffer = string.Format("Msg from UWP: '{0}'. Sent at: {1}. Protocol used: {2}.", message, DateTime.Now.ToLocalTime(), Protocol);
+            Message eventMessage = new Message(Encoding.UTF8.GetBytes(dataBuffer));
+            Debug.WriteLine("Sending message: '{0}'", dataBuffer);
+            return deviceClient.SendEventAsync(eventMessage);
+        }
+
+        public async Task<string> ReceiveCommand()
         {
             Debug.WriteLine("\nDevice waiting for commands from IoTHub...\n");
             Message receivedMessage;
@@ -58,7 +114,7 @@ namespace Microsoft.Azure.Devices.Client.Samples
 
             while (true)
             {
-                receivedMessage = await deviceClient.ReceiveAsync();
+                receivedMessage = await this.deviceClient.ReceiveAsync();
 
                 if (receivedMessage != null)
                 {
@@ -66,6 +122,8 @@ namespace Microsoft.Azure.Devices.Client.Samples
                     Debug.WriteLine("\t{0}> Received message: {1}", DateTime.Now.ToLocalTime(), messageData);
 
                     await deviceClient.CompleteAsync(receivedMessage);
+
+                    return messageData;
                 }
 
                 //  Note: In this sample, the polling interval is set to 

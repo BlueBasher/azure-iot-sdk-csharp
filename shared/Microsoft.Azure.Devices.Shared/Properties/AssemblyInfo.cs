@@ -2,7 +2,6 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 // General Information about an assembly is controlled through the following
@@ -34,4 +33,4 @@ using System.Runtime.InteropServices;
 
 // Version information for an assembly follows semantic versioning 1.0.0 (because
 // NuGet didn't support semver 2.0.0 before VS 2015). See semver.org for details.
-[assembly: AssemblyInformationalVersion("1.0.6")]
+[assembly: AssemblyInformationalVersion("1.0.7")]

@@ -13,11 +13,10 @@ namespace Microsoft.Azure.Devices.Client
     using Microsoft.Azure.Devices.Client.Extensions;
     using Microsoft.Azure.Devices.Client.Transport;
     using Microsoft.Azure.Devices.Shared;
-#if !WINDOWS_UWP && !PCL
+#if !PCL
     using Microsoft.Azure.Devices.Client.Transport.Mqtt;
 #endif
 
-#if !WINDOWS_UWP
     /// <summary>
     /// Delegate for desired property update callbacks.  This will be called
     /// every time we receive a PATCH from the service.
@@ -25,7 +24,6 @@ namespace Microsoft.Azure.Devices.Client
     /// <param name="desiredProperties">Properties that were contained in the update that was received from the service</param>
     /// <param name="userContext">Context object passed in when the callback was registered</param>
     public delegate Task DesiredPropertyUpdateCallback(TwinCollection desiredProperties, object userContext);
-#endif
 
     public delegate Task<MethodResponse> MethodCallback(MethodRequest methodRequest, object userContext);
 
@@ -114,7 +112,8 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
         /// Stores the timeout used in the operation retries.
         /// </summary>
         // Codes_SRS_DEVICECLIENT_28_002: [This property shall be defaulted to 240000 (4 minutes).]
-        public uint OperationTimeoutInMilliseconds { get; set; } = 4 * 60 * 1000;
+        const uint DefaultOperationTimeoutInMilliseconds = 4 * 60 * 1000;
+        public uint OperationTimeoutInMilliseconds { get; set; } = DefaultOperationTimeoutInMilliseconds;
 
         /// <summary>
         /// Stores the retry strategy used in the operation retries.
@@ -128,7 +127,8 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
 
         internal delegate Task OnMethodCalledDelegate(MethodRequestInternal methodRequestInternal);
 
-#if !WINDOWS_UWP
+        internal delegate void OnConnectionClosedDelegate(object sender, EventArgs e);
+
         /// <summary>
         /// Callback to call whenever the twin's desired state is updated by the service
         /// </summary>
@@ -143,7 +143,6 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
         /// userContext passed when registering the twin patch callback
         /// </summary>
         Object twinPatchCallbackContext = null;
-#endif
 
         DeviceClient(IotHubConnectionString iotHubConnectionString, ITransportSettings[] transportSettings, IDeviceClientPipelineBuilder pipelineBuilder)
         {
@@ -153,9 +152,9 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
             pipelineContext.Set(transportSettings);
             pipelineContext.Set(iotHubConnectionString);
             pipelineContext.Set<OnMethodCalledDelegate>(OnMethodCalled);
-#if !WINDOWS_UWP
             pipelineContext.Set<Action<TwinCollection>>(OnReportedStatePatchReceived);
-#endif
+            pipelineContext.Set<OnConnectionClosedDelegate>(OnConnectionClosed);
+
             IDelegatingHandler innerHandler = pipelineBuilder.Build(pipelineContext);
 
             this.InnerHandler = innerHandler;
@@ -352,7 +351,7 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
                     },
                     pipelineBuilder);
                 case TransportType.Mqtt:
-#if WINDOWS_UWP || PCL
+#if PCL
                     throw new NotImplementedException("Mqtt protocol is not supported");
 #else
                     return CreateFromConnectionString(connectionString, new ITransportSettings[]
@@ -370,7 +369,7 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
 #endif
                 case TransportType.Mqtt_WebSocket_Only:
                 case TransportType.Mqtt_Tcp_Only:
-#if WINDOWS_UWP || PCL
+#if PCL
                     throw new NotImplementedException("Mqtt protocol is not supported");
 #else
                     return CreateFromConnectionString(connectionString, new ITransportSettings[] { new MqttTransportSettings(transportType) }, pipelineBuilder);
@@ -467,7 +466,7 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
                             throw new InvalidOperationException("Unknown implementation of ITransportSettings type");
                         }
                         break;
-#if !WINDOWS_UWP && !PCL
+#if !PCL
                     case TransportType.Mqtt_WebSocket_Only:
                     case TransportType.Mqtt_Tcp_Only:
                         if (!(transportSetting is MqttTransportSettings))
@@ -710,7 +709,6 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
             return result;
         }
 
-#if !WINDOWS_UWP
         Task<Twin> ApplyTimeoutTwin(Func<CancellationToken, Task<Twin>> operation)
         {
             if (OperationTimeoutInMilliseconds == 0)
@@ -730,7 +728,6 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
             });
             return result;
         }
-#endif
 
 #if !WINDOWS_UWP && !PCL // ArturL: we should be able to support UploadToBlobAsync for UWP now
         /// <summary>
@@ -866,6 +863,29 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
             }
         }
 
+        /// <summary>
+        /// The delgate for handling disrupted connection/links in the transport layer.
+        /// </summary>
+        internal async void OnConnectionClosed(object sender, EventArgs e)
+        {
+            try
+            {
+                // codes_SRS_DEVICECLIENT_28_022: [** The OnConnectionClosed shall invoke the RecoverConnections operation. **]**
+                // Retry connection recover forever until we have error callback registration from user for connection drop notification
+                OperationTimeoutInMilliseconds = 0;
+                await ApplyTimeout(operationTimeoutCancellationToken => this.InnerHandler.RecoverConnections(sender, operationTimeoutCancellationToken));
+                OperationTimeoutInMilliseconds = DefaultOperationTimeoutInMilliseconds;
+            }
+            catch (Exception ex)
+            {
+                // codes_SRS_DEVICECLIENT_28_023: [**If RecoverConnections operations throw exception, the OnConnectionClosed shall failed silently **]**
+                // catch all and invoke registered error handler on user code?
+            }
+        }
+
+        /// <summary>
+        /// The delgate for handling direct methods received from service.
+        /// </summary>
         internal async Task OnMethodCalled(MethodRequestInternal methodRequestInternal)
         {
             Tuple<MethodCallback, object> m = null;
@@ -1027,7 +1047,6 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
         }
 #endif
 
-#if !WINDOWS_UWP
         /// <summary>
         /// Set a callback that will be called whenever the client receives a state update 
         /// (desired or reported) from the service.  This has the side-effect of subscribing
@@ -1097,8 +1116,6 @@ TODO: revisit DefaultDelegatingHandler - it seems redundant as long as we have t
                 this.desiredPropertyUpdateCallback(patch, this.twinPatchCallbackContext);
             }
         }
-#endif
-
     }
 }
 
